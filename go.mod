@@ -2,7 +2,7 @@ module github.com/itsh-cloud/gateway-auto-listener
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.27.1
 
 require (
 	k8s.io/api v0.36.3
