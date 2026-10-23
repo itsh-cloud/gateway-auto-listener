@@ -172,3 +172,5 @@ kubectl delete -f deploy/manifests.yaml
 ## License
 
 Apache 2.0 - see [LICENSE](LICENSE).
+
+Built and maintained by [ITSH](https://itsh.dev), where it runs in production.

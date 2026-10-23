@@ -18,3 +18,7 @@ keywords:
   - httproute
   - tls
   - controller-runtime
+annotations:
+  artifacthub.io/links: |
+    - name: ITSH
+      url: https://itsh.dev
