@@ -1508,3 +1508,65 @@ func TestNamespaceToHTTPRoutes_AllNamespaces(t *testing.T) {
 		t.Errorf("expected no requests for a trusted namespace, got %v", got)
 	}
 }
+
+// ownedListenerGateway returns a Gateway with one listener for hostname owned by ownerKey.
+func ownedListenerGateway(hostname, ownerKey string) *gatewayv1.Gateway {
+	gw := emptyGateway()
+	name := hostnameToListenerName(hostname)
+	h := gatewayv1.Hostname(hostname)
+	gw.Annotations = map[string]string{ownerAnnotationPrefix + name: ownerKey}
+	gw.Spec.Listeners = []gatewayv1.Listener{{
+		Name:     gatewayv1.SectionName(name),
+		Hostname: &h,
+		Port:     443,
+		Protocol: gatewayv1.HTTPSProtocolType,
+	}}
+	return gw
+}
+
+func TestReconcile_DeletionWithoutCertAnnotationReleasesFinalizer(t *testing.T) {
+	route := certRoute("apps", "web", "www.shop.org")
+	route.Annotations = nil
+	route.Finalizers = []string{finalizerName}
+	now := metav1.NewTime(time.Now())
+	route.DeletionTimestamp = &now
+	r := newReconciler(ownedListenerGateway("www.shop.org", "apps/web"), route)
+	ctx := context.Background()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: "apps"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got gatewayv1.HTTPRoute
+	if err := r.Get(ctx, types.NamespacedName{Name: "web", Namespace: "apps"}, &got); err == nil {
+		t.Errorf("expected the route to be gone once its finalizer is dropped, finalizers: %v", got.Finalizers)
+	}
+	var gw gatewayv1.Gateway
+	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
+	if len(gw.Spec.Listeners) != 0 || len(gw.Annotations) != 0 {
+		t.Errorf("expected the owned listener to be released, got listeners %v annotations %v", gw.Spec.Listeners, gw.Annotations)
+	}
+}
+
+func TestReconcile_RemovedCertAnnotationReleasesFinalizer(t *testing.T) {
+	route := certRoute("apps", "web", "www.shop.org")
+	route.Annotations = nil
+	route.Finalizers = []string{finalizerName}
+	r := newReconciler(ownedListenerGateway("www.shop.org", "apps/web"), route)
+	ctx := context.Background()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: "apps"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got gatewayv1.HTTPRoute
+	_ = r.Get(ctx, types.NamespacedName{Name: "web", Namespace: "apps"}, &got)
+	if controllerutil.ContainsFinalizer(&got, finalizerName) {
+		t.Error("expected the finalizer to be dropped once the cert annotation is gone")
+	}
+	var gw gatewayv1.Gateway
+	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
+	if len(gw.Spec.Listeners) != 0 || len(gw.Annotations) != 0 {
+		t.Errorf("expected the owned listener to be released, got listeners %v annotations %v", gw.Spec.Listeners, gw.Annotations)
+	}
+}

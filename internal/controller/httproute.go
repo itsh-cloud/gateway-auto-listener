@@ -127,21 +127,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if !r.hasCertAnnotation(&httpRoute) {
-		return ctrl.Result{}, nil
-	}
-
-	// Skip the ParentRefs check on the deletion path: a tenant might have edited the
-	// route to drop its parentRef before deleting it, and we still need the finalizer
-	// to clean up listeners we own. Ownership is checked inside removeListeners.
-	if httpRoute.DeletionTimestamp.IsZero() && !r.routeReferencesManagedGateway(&httpRoute) {
-		// Route doesn't list our Gateway as a parent; nothing to do.
-		// Prevents creating phantom listeners for routes attached to a different Gateway.
-		return ctrl.Result{}, nil
-	}
-
-	// Handle deletion
-	if !httpRoute.DeletionTimestamp.IsZero() {
+	// Deletion and a removed cert annotation both end management. Handled ahead of the
+	// annotation and ParentRefs checks: a route may have dropped either before being
+	// deleted, and its finalizer would otherwise block deletion forever. Ownership is
+	// checked inside removeListeners.
+	if !httpRoute.DeletionTimestamp.IsZero() || !r.hasCertAnnotation(&httpRoute) {
 		if controllerutil.ContainsFinalizer(&httpRoute, finalizerName) {
 			if err := r.removeListeners(ctx, &httpRoute); err != nil {
 				return ctrl.Result{}, err
@@ -151,6 +141,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, err
 			}
 		}
+		return ctrl.Result{}, nil
+	}
+
+	if !r.routeReferencesManagedGateway(&httpRoute) {
+		// Route doesn't list our Gateway as a parent; nothing to do.
+		// Prevents creating phantom listeners for routes attached to a different Gateway.
 		return ctrl.Result{}, nil
 	}
 

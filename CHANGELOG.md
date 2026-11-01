@@ -20,6 +20,14 @@
   removed on upgrade. The chart default stays on prefix mode for the same
   reason.
 
+### Fixed
+
+- A route carrying the controller's finalizer but no cert-manager annotation
+  could not be deleted: the finalizer was only handled for annotated routes.
+  Deletion and removal of the annotation now both release the listeners the
+  route owns and drop the finalizer. Removing the annotation from a live route
+  therefore removes its listeners, where before they stayed.
+
 ### Migration
 
 Before switching to `--validate-all-namespaces`, find each namespace outside
