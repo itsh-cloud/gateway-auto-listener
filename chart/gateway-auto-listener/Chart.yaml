@@ -2,8 +2,8 @@ apiVersion: v2
 name: gateway-auto-listener
 description: Kubernetes controller that auto-creates Gateway HTTPS listeners from HTTPRoutes
 type: application
-version: 0.2.5
-appVersion: "0.2.5"
+version: 0.3.0
+appVersion: "0.3.0"
 kubeVersion: ">= 1.28.0"
 home: https://github.com/itsh-cloud/gateway-auto-listener
 sources:
