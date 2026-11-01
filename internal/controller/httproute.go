@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -44,7 +45,19 @@ type HTTPRouteReconciler struct {
 	GatewayNamespace           string
 	AllowedDomainSuffix        string
 	ValidatedNSPrefix          string
+	ValidateAllNamespaces      bool
+	TrustedNamespaces          []string
 	AllowedHostnamesAnnotation string
+}
+
+// namespaceValidated reports whether hostnames of routes in namespace must pass validation.
+// In prefix mode every namespace without the prefix may claim any hostname, which is why
+// that mode is deprecated in favour of validating all namespaces but an explicit list.
+func (r *HTTPRouteReconciler) namespaceValidated(namespace string) bool {
+	if r.ValidateAllNamespaces {
+		return !slices.Contains(r.TrustedNamespaces, namespace)
+	}
+	return r.ValidatedNSPrefix != "" && strings.HasPrefix(namespace, r.ValidatedNSPrefix)
 }
 
 func (r *HTTPRouteReconciler) hasCertAnnotation(httpRoute *gatewayv1.HTTPRoute) bool {
@@ -58,11 +71,7 @@ func (r *HTTPRouteReconciler) hasCertAnnotation(httpRoute *gatewayv1.HTTPRoute) 
 }
 
 func (r *HTTPRouteReconciler) validateHostname(ctx context.Context, hostname, namespace string) error {
-	if r.ValidatedNSPrefix == "" {
-		return nil
-	}
-
-	if !strings.HasPrefix(namespace, r.ValidatedNSPrefix) {
+	if !r.namespaceValidated(namespace) {
 		return nil
 	}
 
@@ -493,7 +502,7 @@ func (r *HTTPRouteReconciler) namespaceToHTTPRoutes(ctx context.Context, obj cli
 		return nil
 	}
 
-	if r.ValidatedNSPrefix != "" && !strings.HasPrefix(ns.Name, r.ValidatedNSPrefix) {
+	if !r.namespaceValidated(ns.Name) {
 		return nil
 	}
 

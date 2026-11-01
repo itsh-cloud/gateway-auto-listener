@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **Hostname validation can now cover every namespace.** With
+  `--validated-ns-prefix`, routes in any namespace without the prefix could
+  claim any hostname. Because a Gateway listener takes precedence over a
+  ListenerSet listener for the same hostname, such a route could take over
+  traffic and certificates for hostnames served through ListenerSets. The new
+  `--validate-all-namespaces` flag validates every namespace except those
+  named in `--trusted-namespaces` (chart: `hostnameValidation.allNamespaces`
+  and `hostnameValidation.trustedNamespaces`).
+
+### Deprecated
+
+- `--validated-ns-prefix` (chart: `hostnameValidation.namespacePrefix`). It
+  keeps working, with a warning at startup, so existing listeners are not
+  removed on upgrade. The chart default stays on prefix mode for the same
+  reason.
+
+### Migration
+
+Before switching to `--validate-all-namespaces`, find each namespace outside
+the prefix whose routes own listeners (the Gateway's
+`gateway-auto-listener.itsh.dev/owner.<listener>` annotations name the owning
+route as `<namespace>/<name>`). Then either allow its hostnames through the
+namespace annotation or add it to `--trusted-namespaces`. A listener whose
+owning route no longer validates is removed on the next reconcile. The
+controller refuses to start if `--trusted-namespaces` is set without
+`--validate-all-namespaces`, if both modes are set, or if a trusted entry is
+not a valid namespace name.
+
 ## v0.2.5
 
 - The project moved from `an0nfunc` to the `itsh-cloud` organisation. A GitHub

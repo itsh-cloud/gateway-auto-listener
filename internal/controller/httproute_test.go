@@ -1350,3 +1350,161 @@ func TestReconcile_LegacyAnnotationCannotForgeOnUnownedListener(t *testing.T) {
 		t.Errorf("attacker successfully claimed ownership of victim listener: %q", got)
 	}
 }
+
+func newAllNamespacesReconciler(objs ...client.Object) *HTTPRouteReconciler {
+	r := newReconciler(objs...)
+	r.ValidatedNSPrefix = ""
+	r.ValidateAllNamespaces = true
+	r.TrustedNamespaces = []string{"platform"}
+	return r
+}
+
+func TestValidateHostname_AllNamespaces(t *testing.T) {
+	apps := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:        "apps",
+		Annotations: map[string]string{"gateway-auto-listener/allowed-hostnames": "shop.org"},
+	}}
+	tenant := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant-1"}}
+	r := newAllNamespacesReconciler(apps, tenant)
+	ctx := context.Background()
+
+	tests := []struct {
+		namespace, hostname string
+		allowed             bool
+	}{
+		{"platform", "dashboard.example.org", true},
+		{"apps", "dashboard.example.org", false},
+		{"apps", "www.shop.org", true},
+		{"apps", "web.apps.example.com", true},
+		{"apps", "web.platform.example.com", false},
+		{"tenant-1", "dashboard.example.org", false},
+		{"tenant-1", "web.tenant-1.example.com", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.namespace+"/"+tt.hostname, func(t *testing.T) {
+			err := r.validateHostname(ctx, tt.hostname, tt.namespace)
+			if tt.allowed && err != nil {
+				t.Errorf("expected %s to be allowed in %s, got: %v", tt.hostname, tt.namespace, err)
+			}
+			if !tt.allowed && err == nil {
+				t.Errorf("expected %s to be rejected in %s", tt.hostname, tt.namespace)
+			}
+		})
+	}
+}
+
+// reconcileTwice runs the finalizer pass and the listener pass for one route.
+func reconcileTwice(t *testing.T, r *HTTPRouteReconciler, namespace, name string) {
+	t.Helper()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: namespace}}
+	for range 2 {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+}
+
+func certRoute(namespace, name, hostname string) *gatewayv1.HTTPRoute {
+	return &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: map[string]string{"cert-manager.io/cluster-issuer": "letsencrypt"},
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Hostnames:       []gatewayv1.Hostname{gatewayv1.Hostname(hostname)},
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: parentRefsToDefault()},
+		},
+	}
+}
+
+func emptyGateway() *gatewayv1.Gateway {
+	return &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "nginx-gateway"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "nginx"},
+	}
+}
+
+// A hostname served only by a ListenerSet has no Gateway listener, so a Gateway listener
+// created for it takes precedence over the ListenerSet's and diverts its traffic. Only
+// trusted namespaces may get one without passing validation.
+func TestReconcile_AllNamespaces_UntrustedNamespaceCannotClaimListener(t *testing.T) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}}
+	r := newAllNamespacesReconciler(ns, emptyGateway(),
+		certRoute("apps", "takeover", "dashboard.example.org"),
+		certRoute("platform", "dashboard", "metrics.example.org"))
+	ctx := context.Background()
+
+	reconcileTwice(t, r, "apps", "takeover")
+	reconcileTwice(t, r, "platform", "dashboard")
+
+	var gw gatewayv1.Gateway
+	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
+	if len(gw.Spec.Listeners) != 1 || string(gw.Spec.Listeners[0].Name) != "https-metrics-example-org" {
+		t.Fatalf("expected only the trusted namespace's listener, got %v", gw.Spec.Listeners)
+	}
+	if _, owned := gw.Annotations[ownerAnnotationPrefix+"https-dashboard-example-org"]; owned {
+		t.Error("untrusted route must not be recorded as owner of a listener")
+	}
+}
+
+// Prefix mode lets every namespace without the prefix claim any hostname. Pinned so the
+// difference to all-namespaces mode stays visible.
+func TestReconcile_PrefixMode_NonPrefixNamespaceClaimsListener(t *testing.T) {
+	r := newReconciler(emptyGateway(), certRoute("apps", "takeover", "dashboard.example.org"))
+	ctx := context.Background()
+
+	reconcileTwice(t, r, "apps", "takeover")
+
+	var gw gatewayv1.Gateway
+	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
+	if len(gw.Spec.Listeners) != 1 {
+		t.Fatalf("expected prefix mode to create the listener, got %v", gw.Spec.Listeners)
+	}
+}
+
+// Switching to all-namespaces mode removes listeners that routes in namespaces that are now
+// validated own for hostnames they may not claim. Trusted namespaces keep theirs.
+func TestReconcile_AllNamespaces_RemovesListenerOfNowUntrustedNamespace(t *testing.T) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}}
+	gateway := emptyGateway()
+	appsRoute := certRoute("apps", "takeover", "dashboard.example.org")
+	platformRoute := certRoute("platform", "dashboard", "metrics.example.org")
+
+	r := newReconciler(ns, gateway, appsRoute, platformRoute)
+	reconcileTwice(t, r, "apps", "takeover")
+	reconcileTwice(t, r, "platform", "dashboard")
+
+	r.ValidatedNSPrefix = ""
+	r.ValidateAllNamespaces = true
+	r.TrustedNamespaces = []string{"platform"}
+	reconcileTwice(t, r, "apps", "takeover")
+	reconcileTwice(t, r, "platform", "dashboard")
+
+	var gw gatewayv1.Gateway
+	_ = r.Get(context.Background(), types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
+	if len(gw.Spec.Listeners) != 1 || string(gw.Spec.Listeners[0].Name) != "https-metrics-example-org" {
+		t.Fatalf("expected only the trusted namespace's listener to remain, got %v", gw.Spec.Listeners)
+	}
+	if _, owned := gw.Annotations[ownerAnnotationPrefix+"https-dashboard-example-org"]; owned {
+		t.Error("owner annotation of the removed listener must be released")
+	}
+}
+
+func TestNamespaceToHTTPRoutes_AllNamespaces(t *testing.T) {
+	apps := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}}
+	platform := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "platform"}}
+	appsRoute := certRoute("apps", "web", "www.shop.org")
+	appsRoute.Finalizers = []string{finalizerName}
+	platformRoute := certRoute("platform", "dashboard", "metrics.example.org")
+	platformRoute.Finalizers = []string{finalizerName}
+	r := newAllNamespacesReconciler(apps, platform, appsRoute, platformRoute)
+	ctx := context.Background()
+
+	if got := r.namespaceToHTTPRoutes(ctx, apps); len(got) != 1 || got[0].Name != "web" {
+		t.Errorf("expected the validated namespace's route to be enqueued, got %v", got)
+	}
+	if got := r.namespaceToHTTPRoutes(ctx, platform); len(got) != 0 {
+		t.Errorf("expected no requests for a trusted namespace, got %v", got)
+	}
+}

@@ -18,6 +18,11 @@ gateway:
 # set enabled=false explicitly if you trust every namespace to claim any hostname.
 hostnameValidation:
   enabled: true
+  # Validate every namespace except trustedNamespaces. With it off, only namespaces
+  # starting with namespacePrefix are validated and the rest may claim any hostname.
+  allNamespaces: false
+  trustedNamespaces: []
+  # Deprecated, used only while allNamespaces is false.
   namespacePrefix: "tenant-"
   domainSuffix: ""
   hostnamesAnnotation: "gateway-auto-listener/allowed-hostnames"

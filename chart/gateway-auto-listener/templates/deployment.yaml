@@ -41,7 +41,14 @@ spec:
             - --gateway-name={{ .Values.gateway.name }}
             - --gateway-namespace={{ .Values.gateway.namespace }}
             {{- if .Values.hostnameValidation.enabled }}
+            {{- if .Values.hostnameValidation.allNamespaces }}
+            - --validate-all-namespaces
+            {{- with .Values.hostnameValidation.trustedNamespaces }}
+            - --trusted-namespaces={{ join "," . }}
+            {{- end }}
+            {{- else }}
             - --validated-ns-prefix={{ .Values.hostnameValidation.namespacePrefix }}
+            {{- end }}
             - --allowed-domain-suffix={{ .Values.hostnameValidation.domainSuffix }}
             - --allowed-hostnames-annotation={{ .Values.hostnameValidation.hostnamesAnnotation }}
             {{- end }}

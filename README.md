@@ -115,7 +115,9 @@ kubectl apply -f https://raw.githubusercontent.com/itsh-cloud/gateway-auto-liste
 |------|---------|-------------|
 | `--gateway-name` | `default` | Name of the Gateway to manage listeners on |
 | `--gateway-namespace` | `nginx-gateway` | Namespace of the Gateway |
-| `--validated-ns-prefix` | `""` (disabled) | Namespace prefix triggering hostname validation |
+| `--validate-all-namespaces` | `false` | Validate hostnames in every namespace except those in `--trusted-namespaces` |
+| `--trusted-namespaces` | `""` | Comma-separated namespaces whose routes may claim any hostname (requires `--validate-all-namespaces`) |
+| `--validated-ns-prefix` | `""` (disabled) | Deprecated. Namespace prefix triggering hostname validation |
 | `--allowed-domain-suffix` | `""` | Domain suffix for tenant default subdomains |
 | `--allowed-hostnames-annotation` | `gateway-auto-listener/allowed-hostnames` | Namespace annotation key for allowed custom hostnames |
 | `--metrics-bind-address` | `:8080` | Metrics endpoint bind address |
@@ -128,7 +130,9 @@ See [values.yaml](chart/gateway-auto-listener/values.yaml) for all available Hel
 
 ## Hostname Validation
 
-When `--validated-ns-prefix` is set (e.g., `tenant-`), namespaces matching that prefix are subject to hostname validation:
+With `--validate-all-namespaces`, routes in every namespace are subject to hostname validation, except namespaces named in `--trusted-namespaces`. Trust only namespaces whose HTTPRoutes are written by the cluster operator: a route there can claim any hostname, including one served by a ListenerSet, and a Gateway listener takes precedence over a ListenerSet listener for the same hostname.
+
+A validated namespace may use:
 
 1. **Default subdomain**: `<anything>.<namespace>.<domain-suffix>` is always allowed (when `--allowed-domain-suffix` is set).
 2. **Custom domains**: Listed in the namespace annotation (comma-separated). Subdomains are also allowed. A `*.apex` entry allows any hostname strictly below `apex` (not `apex` itself); malformed wildcard entries (`*`, `*foo.bar`) match nothing.
@@ -142,7 +146,17 @@ metadata:
     gateway-auto-listener/allowed-hostnames: "acme.com, shop.acme.org, *.staging.acme.org"
 ```
 
-Namespaces not matching the prefix can use any hostname.
+### Deprecated: `--validated-ns-prefix`
+
+With `--validated-ns-prefix` (e.g., `tenant-`), only namespaces matching the prefix are validated, and every other namespace can use any hostname. Any namespace where someone other than the cluster operator can create HTTPRoutes can then take over listeners and certificates for other hostnames. The flag still works and logs a deprecation warning at startup. It cannot be combined with `--validate-all-namespaces`.
+
+To migrate:
+
+1. List the namespaces outside the prefix whose routes own listeners: the Gateway annotations `gateway-auto-listener.itsh.dev/owner.<listener>` name each owning route as `<namespace>/<name>`.
+2. For each, either add its hostnames to its allowed-hostnames annotation or add the namespace to `--trusted-namespaces`.
+3. Replace `--validated-ns-prefix` with `--validate-all-namespaces`. A listener owned by a route whose hostname no longer validates is removed on the next reconcile.
+
+With the Helm chart, set `hostnameValidation.allNamespaces: true` and `hostnameValidation.trustedNamespaces`.
 
 ## Uninstall
 
@@ -165,7 +179,7 @@ kubectl delete -f deploy/manifests.yaml
 
 **Listener not created**: Check that the HTTPRoute has a `cert-manager.io/cluster-issuer` or `cert-manager.io/issuer` annotation.
 
-**Hostname rejected**: Check the namespace annotation for allowed hostnames and verify the `--validated-ns-prefix` and `--allowed-domain-suffix` flags.
+**Hostname rejected**: Check the namespace annotation for allowed hostnames and verify the `--trusted-namespaces` (or deprecated `--validated-ns-prefix`) and `--allowed-domain-suffix` flags.
 
 **Finalizer stuck on HTTPRoute**: The controller must be running to process finalizer removal. If the controller is gone, manually remove the finalizer.
 

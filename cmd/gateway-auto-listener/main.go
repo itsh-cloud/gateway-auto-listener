@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -36,6 +39,8 @@ func main() {
 		gatewayNamespace           string
 		allowedDomainSuffix        string
 		validatedNSPrefix          string
+		validateAllNamespaces      bool
+		trustedNamespacesFlag      string
 		allowedHostnamesAnnotation string
 		showVersion                bool
 	)
@@ -45,7 +50,9 @@ func main() {
 	flag.StringVar(&gatewayName, "gateway-name", "default", "Name of the Gateway to manage listeners on.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "nginx-gateway", "Namespace of the Gateway.")
 	flag.StringVar(&allowedDomainSuffix, "allowed-domain-suffix", "", "Domain suffix for tenant hostnames (e.g., example.com). Empty disables suffix validation.")
-	flag.StringVar(&validatedNSPrefix, "validated-ns-prefix", "", "Namespace prefix triggering hostname validation. Empty disables validation entirely.")
+	flag.BoolVar(&validateAllNamespaces, "validate-all-namespaces", false, "Validate hostnames in every namespace except those listed in --trusted-namespaces.")
+	flag.StringVar(&trustedNamespacesFlag, "trusted-namespaces", "", "Comma-separated namespaces whose routes may claim any hostname. Requires --validate-all-namespaces.")
+	flag.StringVar(&validatedNSPrefix, "validated-ns-prefix", "", "Deprecated: use --validate-all-namespaces. Namespace prefix triggering hostname validation; namespaces without it may claim any hostname. Empty disables validation entirely.")
 	flag.StringVar(&allowedHostnamesAnnotation, "allowed-hostnames-annotation", "gateway-auto-listener/allowed-hostnames", "Namespace annotation key for allowed custom hostnames.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit.")
 
@@ -59,6 +66,16 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	trustedNamespaces, err := parseNamespaceValidation(validateAllNamespaces, trustedNamespacesFlag, validatedNSPrefix)
+	if err != nil {
+		setupLog.Error(err, "invalid hostname validation flags")
+		os.Exit(1)
+	}
+	if validatedNSPrefix != "" {
+		setupLog.Info("--validated-ns-prefix is deprecated: routes in namespaces without the prefix may claim any hostname; use --validate-all-namespaces with --trusted-namespaces",
+			"prefix", validatedNSPrefix)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -82,6 +99,8 @@ func main() {
 		GatewayNamespace:           gatewayNamespace,
 		AllowedDomainSuffix:        allowedDomainSuffix,
 		ValidatedNSPrefix:          validatedNSPrefix,
+		ValidateAllNamespaces:      validateAllNamespaces,
+		TrustedNamespaces:          trustedNamespaces,
 		AllowedHostnamesAnnotation: allowedHostnamesAnnotation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HTTPRoute")
@@ -102,4 +121,28 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// parseNamespaceValidation checks the hostname validation flags and returns the trusted
+// namespaces. Names must be exact: a pattern such as "tenant-*" would match nothing and
+// silently strip the listeners of the namespaces it was meant to trust.
+func parseNamespaceValidation(validateAll bool, trusted, prefix string) ([]string, error) {
+	if validateAll && prefix != "" {
+		return nil, errors.New("--validate-all-namespaces and --validated-ns-prefix are mutually exclusive")
+	}
+	var names []string
+	for _, name := range strings.Split(trusted, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
+			return nil, fmt.Errorf("--trusted-namespaces: %q is not a namespace name: %s", name, strings.Join(errs, "; "))
+		}
+		names = append(names, name)
+	}
+	if len(names) > 0 && !validateAll {
+		return nil, errors.New("--trusted-namespaces requires --validate-all-namespaces")
+	}
+	return names, nil
 }
