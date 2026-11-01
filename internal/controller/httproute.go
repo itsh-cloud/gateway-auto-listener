@@ -51,8 +51,6 @@ type HTTPRouteReconciler struct {
 }
 
 // namespaceValidated reports whether hostnames of routes in namespace must pass validation.
-// In prefix mode every namespace without the prefix may claim any hostname, which is why
-// that mode is deprecated in favour of validating all namespaces but an explicit list.
 func (r *HTTPRouteReconciler) namespaceValidated(namespace string) bool {
 	if r.ValidateAllNamespaces {
 		return !slices.Contains(r.TrustedNamespaces, namespace)
@@ -127,10 +125,9 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Deletion and a removed cert annotation both end management. Handled ahead of the
-	// annotation and ParentRefs checks: a route may have dropped either before being
-	// deleted, and its finalizer would otherwise block deletion forever. Ownership is
-	// checked inside removeListeners.
+	// Deletion and a removed cert annotation both end management, ahead of the ParentRefs
+	// check: a route may drop its parentRef or annotation before it is deleted, and its
+	// finalizer would then block deletion forever. removeListeners checks ownership.
 	if !httpRoute.DeletionTimestamp.IsZero() || !r.hasCertAnnotation(&httpRoute) {
 		if controllerutil.ContainsFinalizer(&httpRoute, finalizerName) {
 			if err := r.removeListeners(ctx, &httpRoute); err != nil {

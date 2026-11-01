@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1425,6 +1426,29 @@ func emptyGateway() *gatewayv1.Gateway {
 	}
 }
 
+// getGateway returns the managed Gateway, failing the test if it cannot be read.
+func getGateway(t *testing.T, r *HTTPRouteReconciler) gatewayv1.Gateway {
+	t.Helper()
+	var gw gatewayv1.Gateway
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw); err != nil {
+		t.Fatalf("failed to get gateway: %v", err)
+	}
+	return gw
+}
+
+// assertOnlyPlatformListener checks that the platform route's listener is the only one
+// and that the apps route owns none.
+func assertOnlyPlatformListener(t *testing.T, r *HTTPRouteReconciler) {
+	t.Helper()
+	gw := getGateway(t, r)
+	if len(gw.Spec.Listeners) != 1 || string(gw.Spec.Listeners[0].Name) != "https-metrics-example-org" {
+		t.Fatalf("expected only the trusted namespace's listener, got %v", gw.Spec.Listeners)
+	}
+	if _, owned := gw.Annotations[ownerAnnotationPrefix+"https-dashboard-example-org"]; owned {
+		t.Error("the untrusted route must not own a listener")
+	}
+}
+
 // A hostname served only by a ListenerSet has no Gateway listener, so a Gateway listener
 // created for it takes precedence over the ListenerSet's and diverts its traffic. Only
 // trusted namespaces may get one without passing validation.
@@ -1433,47 +1457,26 @@ func TestReconcile_AllNamespaces_UntrustedNamespaceCannotClaimListener(t *testin
 	r := newAllNamespacesReconciler(ns, emptyGateway(),
 		certRoute("apps", "takeover", "dashboard.example.org"),
 		certRoute("platform", "dashboard", "metrics.example.org"))
-	ctx := context.Background()
 
 	reconcileTwice(t, r, "apps", "takeover")
 	reconcileTwice(t, r, "platform", "dashboard")
 
-	var gw gatewayv1.Gateway
-	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
-	if len(gw.Spec.Listeners) != 1 || string(gw.Spec.Listeners[0].Name) != "https-metrics-example-org" {
-		t.Fatalf("expected only the trusted namespace's listener, got %v", gw.Spec.Listeners)
-	}
-	if _, owned := gw.Annotations[ownerAnnotationPrefix+"https-dashboard-example-org"]; owned {
-		t.Error("untrusted route must not be recorded as owner of a listener")
-	}
+	assertOnlyPlatformListener(t, r)
 }
 
-// Prefix mode lets every namespace without the prefix claim any hostname. Pinned so the
-// difference to all-namespaces mode stays visible.
-func TestReconcile_PrefixMode_NonPrefixNamespaceClaimsListener(t *testing.T) {
-	r := newReconciler(emptyGateway(), certRoute("apps", "takeover", "dashboard.example.org"))
-	ctx := context.Background()
-
-	reconcileTwice(t, r, "apps", "takeover")
-
-	var gw gatewayv1.Gateway
-	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
-	if len(gw.Spec.Listeners) != 1 {
-		t.Fatalf("expected prefix mode to create the listener, got %v", gw.Spec.Listeners)
-	}
-}
-
-// Switching to all-namespaces mode removes listeners that routes in namespaces that are now
-// validated own for hostnames they may not claim. Trusted namespaces keep theirs.
+// Prefix mode lets every namespace without the prefix claim any hostname. Switching to
+// all-namespaces mode removes the listeners of routes whose hostnames now fail validation,
+// while trusted namespaces keep theirs.
 func TestReconcile_AllNamespaces_RemovesListenerOfNowUntrustedNamespace(t *testing.T) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}}
-	gateway := emptyGateway()
-	appsRoute := certRoute("apps", "takeover", "dashboard.example.org")
-	platformRoute := certRoute("platform", "dashboard", "metrics.example.org")
-
-	r := newReconciler(ns, gateway, appsRoute, platformRoute)
+	r := newReconciler(ns, emptyGateway(),
+		certRoute("apps", "takeover", "dashboard.example.org"),
+		certRoute("platform", "dashboard", "metrics.example.org"))
 	reconcileTwice(t, r, "apps", "takeover")
 	reconcileTwice(t, r, "platform", "dashboard")
+	if gw := getGateway(t, r); len(gw.Spec.Listeners) != 2 {
+		t.Fatalf("expected prefix mode to create both listeners, got %v", gw.Spec.Listeners)
+	}
 
 	r.ValidatedNSPrefix = ""
 	r.ValidateAllNamespaces = true
@@ -1481,14 +1484,7 @@ func TestReconcile_AllNamespaces_RemovesListenerOfNowUntrustedNamespace(t *testi
 	reconcileTwice(t, r, "apps", "takeover")
 	reconcileTwice(t, r, "platform", "dashboard")
 
-	var gw gatewayv1.Gateway
-	_ = r.Get(context.Background(), types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
-	if len(gw.Spec.Listeners) != 1 || string(gw.Spec.Listeners[0].Name) != "https-metrics-example-org" {
-		t.Fatalf("expected only the trusted namespace's listener to remain, got %v", gw.Spec.Listeners)
-	}
-	if _, owned := gw.Annotations[ownerAnnotationPrefix+"https-dashboard-example-org"]; owned {
-		t.Error("owner annotation of the removed listener must be released")
-	}
+	assertOnlyPlatformListener(t, r)
 }
 
 func TestNamespaceToHTTPRoutes_AllNamespaces(t *testing.T) {
@@ -1532,18 +1528,17 @@ func TestReconcile_DeletionWithoutCertAnnotationReleasesFinalizer(t *testing.T) 
 	route.DeletionTimestamp = &now
 	r := newReconciler(ownedListenerGateway("www.shop.org", "apps/web"), route)
 	ctx := context.Background()
+	key := types.NamespacedName{Name: "web", Namespace: "apps"}
 
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: "apps"}}); err != nil {
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	var got gatewayv1.HTTPRoute
-	if err := r.Get(ctx, types.NamespacedName{Name: "web", Namespace: "apps"}, &got); err == nil {
-		t.Errorf("expected the route to be gone once its finalizer is dropped, finalizers: %v", got.Finalizers)
+	if err := r.Get(ctx, key, &got); !apierrors.IsNotFound(err) {
+		t.Errorf("expected the route to be gone once its finalizer is dropped, got err %v, finalizers %v", err, got.Finalizers)
 	}
-	var gw gatewayv1.Gateway
-	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
-	if len(gw.Spec.Listeners) != 0 || len(gw.Annotations) != 0 {
+	if gw := getGateway(t, r); len(gw.Spec.Listeners) != 0 || len(gw.Annotations) != 0 {
 		t.Errorf("expected the owned listener to be released, got listeners %v annotations %v", gw.Spec.Listeners, gw.Annotations)
 	}
 }
@@ -1554,19 +1549,20 @@ func TestReconcile_RemovedCertAnnotationReleasesFinalizer(t *testing.T) {
 	route.Finalizers = []string{finalizerName}
 	r := newReconciler(ownedListenerGateway("www.shop.org", "apps/web"), route)
 	ctx := context.Background()
+	key := types.NamespacedName{Name: "web", Namespace: "apps"}
 
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: "apps"}}); err != nil {
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	var got gatewayv1.HTTPRoute
-	_ = r.Get(ctx, types.NamespacedName{Name: "web", Namespace: "apps"}, &got)
+	if err := r.Get(ctx, key, &got); err != nil {
+		t.Fatalf("failed to get route: %v", err)
+	}
 	if controllerutil.ContainsFinalizer(&got, finalizerName) {
 		t.Error("expected the finalizer to be dropped once the cert annotation is gone")
 	}
-	var gw gatewayv1.Gateway
-	_ = r.Get(ctx, types.NamespacedName{Name: "default", Namespace: "nginx-gateway"}, &gw)
-	if len(gw.Spec.Listeners) != 0 || len(gw.Annotations) != 0 {
+	if gw := getGateway(t, r); len(gw.Spec.Listeners) != 0 || len(gw.Annotations) != 0 {
 		t.Errorf("expected the owned listener to be released, got listeners %v annotations %v", gw.Spec.Listeners, gw.Annotations)
 	}
 }
