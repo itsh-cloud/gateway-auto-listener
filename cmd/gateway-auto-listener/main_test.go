@@ -16,7 +16,7 @@ func TestParseNamespaceValidation(t *testing.T) {
 	}{
 		{name: "prefix mode", prefix: "tenant-"},
 		{name: "all namespaces, none trusted", validateAll: true},
-		{name: "all namespaces with trusted list", validateAll: true, trusted: " platform, ,registry ", want: []string{"platform", "registry"}},
+		{name: "all namespaces with trusted list", validateAll: true, trusted: " platform, ,monitoring ", want: []string{"platform", "monitoring"}},
 		{name: "trusted list without all namespaces", trusted: "platform", wantErr: true},
 		{name: "trusted list in prefix mode", trusted: "platform", prefix: "tenant-", wantErr: true},
 		{name: "all namespaces and prefix", validateAll: true, prefix: "tenant-", wantErr: true},

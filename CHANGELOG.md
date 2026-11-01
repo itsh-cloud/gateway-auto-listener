@@ -26,7 +26,7 @@
   could not be deleted: the finalizer was only handled for annotated routes.
   Deletion and removal of the annotation now both release the listeners the
   route owns and drop the finalizer. Removing the annotation from a live route
-  therefore removes its listeners, where before they stayed.
+  now also removes its listeners.
 
 ### Migration
 
